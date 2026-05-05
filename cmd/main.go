@@ -1,11 +1,13 @@
 package main
 
 import (
+	"context"
 	"log/slog"
 	"os"
 	"os/signal"
 	"path"
 	"syscall"
+	"time"
 
 	"github.com/cheatsnake/airstation/internal/config"
 	"github.com/cheatsnake/airstation/internal/http"
@@ -37,15 +39,20 @@ func main() {
 	go httpServer.Run()
 
 	<-stopSignal
-	shutdown(log, store)
+	shutdown(log, store, httpServer)
 }
 
-func shutdown(log *slog.Logger, store storage.Storage) {
+func shutdown(log *slog.Logger, store storage.Storage, httpServer *http.Server) {
 	println()
 	log.Info("Shutting down the app...")
 
-	err := store.Close()
-	if err != nil {
+	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
+	defer cancel()
+	if err := httpServer.Shutdown(ctx); err != nil {
+		log.Error("HTTP server shutdown failed: " + err.Error())
+	}
+
+	if err := store.Close(); err != nil {
 		log.Error("Failed to close database connection: " + err.Error())
 	}
 
