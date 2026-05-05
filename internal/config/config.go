@@ -34,7 +34,7 @@ func Load() *Config {
 		TmpDir:       getEnv("AIRSTATION_TMP_DIR", filepath.Join("static", "tmp")),
 		PlayerDir:    getEnv("AIRSTATION_PLAYER_DIR", filepath.Join("web", "player", "dist")),
 		StudioDir:    getEnv("AIRSTATION_STUDIO_DIR", filepath.Join("web", "studio", "dist")),
-		HTTPPort:     getEnv("AIRSTATION_HTTP_PORT", "7331"),
+		HTTPPort:     getEnv("AIRSTATION_HTTP_PORT", getEnv("PORT", "7331")),
 		JWTSign:      getSecret("AIRSTATION_JWT_SIGN"),
 		SecretKey:    getSecret("AIRSTATION_SECRET_KEY"),
 		SecureCookie: getEnvBool("AIRSTATION_SECURE_COOKIE", false),

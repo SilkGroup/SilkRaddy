@@ -1,6 +1,8 @@
 package http
 
 import (
+	"context"
+	"errors"
 	"log/slog"
 	"mime"
 	"net/http"
@@ -31,6 +33,7 @@ type Server struct {
 	config          *config.Config
 	logger          *slog.Logger
 	router          *http.ServeMux
+	httpServer      *http.Server
 }
 
 func NewServer(store storage.Storage, conf *config.Config, logger *slog.Logger) *Server {
@@ -42,7 +45,8 @@ func NewServer(store storage.Storage, conf *config.Config, logger *slog.Logger) 
 	ss := station.NewService(store)
 	state := playback.NewState(ts, qs, ps, conf.TmpDir, logger.WithGroup("playback"))
 
-	return &Server{
+	router := http.NewServeMux()
+	s := &Server{
 		playbackState:   state,
 		eventsEmitter:   sse.NewEmitter(),
 		trackService:    ts,
@@ -52,8 +56,13 @@ func NewServer(store storage.Storage, conf *config.Config, logger *slog.Logger) 
 		stationService:  ss,
 		config:          conf,
 		logger:          logger.WithGroup("http"),
-		router:          http.NewServeMux(),
+		router:          router,
 	}
+	s.httpServer = &http.Server{
+		Addr:    ":" + conf.HTTPPort,
+		Handler: cors.Default().Handler(router),
+	}
+	return s
 }
 
 func (s *Server) Run() {
@@ -101,10 +110,18 @@ func (s *Server) Run() {
 	s.playbackService.DeleteOldPlaybackHistory()
 
 	s.logger.Info("Server starts on http://localhost:" + s.config.HTTPPort)
-	err = http.ListenAndServe(":"+s.config.HTTPPort, cors.Default().Handler(s.router))
-	if err != nil {
+	err = s.httpServer.ListenAndServe()
+	if err != nil && !errors.Is(err, http.ErrServerClosed) {
 		s.logger.Error("Listen and serve failed", slog.String("info", err.Error()))
 	}
+}
+
+// Shutdown gracefully stops the HTTP server, allowing in-flight requests to
+// finish until ctx is cancelled. Cloud Run sends SIGTERM with a 10s grace
+// window before SIGKILL, so callers should pass a context with a slightly
+// shorter timeout.
+func (s *Server) Shutdown(ctx context.Context) error {
+	return s.httpServer.Shutdown(ctx)
 }
 
 func (s *Server) registerMP2TMimeType() {
