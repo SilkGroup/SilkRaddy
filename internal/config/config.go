@@ -12,8 +12,10 @@ import (
 const minSecretLength = 10
 
 type Config struct {
+	DBDriver     string
 	DBDir        string
 	DBFile       string
+	PostgresURL  string
 	TracksDir    string
 	TmpDir       string
 	PlayerDir    string
@@ -28,8 +30,10 @@ func Load() *Config {
 	_ = godotenv.Load() // For development
 
 	return &Config{
+		DBDriver:     getEnv("AIRSTATION_DB_DRIVER", "sqlite"),
 		DBDir:        getEnv("AIRSTATION_DB_DIR", filepath.Join("storage")),
 		DBFile:       getEnv("AIRSTATION_DB_FILE", "storage.db"),
+		PostgresURL:  getEnv("AIRSTATION_POSTGRES_URL", ""),
 		TracksDir:    getEnv("AIRSTATION_TRACKS_DIR", filepath.Join("static", "tracks")),
 		TmpDir:       getEnv("AIRSTATION_TMP_DIR", filepath.Join("static", "tmp")),
 		PlayerDir:    getEnv("AIRSTATION_PLAYER_DIR", filepath.Join("web", "player", "dist")),
