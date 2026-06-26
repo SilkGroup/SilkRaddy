@@ -1,7 +1,8 @@
 package config
 
 import (
-	"log"
+	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -26,10 +27,24 @@ type Config struct {
 	SecureCookie bool
 }
 
-func Load() *Config {
+// Load reads configuration from environment variables (with .env support for
+// local dev). It returns an aggregated error if any required secret is missing
+// or too short, so callers can log and exit cleanly instead of dying inside
+// the config package.
+func Load() (*Config, error) {
 	_ = godotenv.Load() // For development
 
-	return &Config{
+	var errs []error
+	jwtSign, err := getSecret("AIRSTATION_JWT_SIGN")
+	if err != nil {
+		errs = append(errs, err)
+	}
+	secretKey, err := getSecret("AIRSTATION_SECRET_KEY")
+	if err != nil {
+		errs = append(errs, err)
+	}
+
+	cfg := &Config{
 		DBDriver:     getEnv("AIRSTATION_DB_DRIVER", "sqlite"),
 		DBDir:        getEnv("AIRSTATION_DB_DIR", filepath.Join("storage")),
 		DBFile:       getEnv("AIRSTATION_DB_FILE", "storage.db"),
@@ -39,10 +54,15 @@ func Load() *Config {
 		PlayerDir:    getEnv("AIRSTATION_PLAYER_DIR", filepath.Join("web", "player", "dist")),
 		StudioDir:    getEnv("AIRSTATION_STUDIO_DIR", filepath.Join("web", "studio", "dist")),
 		HTTPPort:     getEnv("AIRSTATION_HTTP_PORT", getEnv("PORT", "7331")),
-		JWTSign:      getSecret("AIRSTATION_JWT_SIGN"),
-		SecretKey:    getSecret("AIRSTATION_SECRET_KEY"),
+		JWTSign:      jwtSign,
+		SecretKey:    secretKey,
 		SecureCookie: getEnvBool("AIRSTATION_SECURE_COOKIE", false),
 	}
+
+	if len(errs) > 0 {
+		return nil, errors.Join(errs...)
+	}
+	return cfg, nil
 }
 
 func getEnv(key, defaultValue string) string {
@@ -62,16 +82,13 @@ func getEnvBool(key string, defaultValue bool) bool {
 	return val == "1" || val == "true" || val == "yes" || val == "on"
 }
 
-func getSecret(key string) string {
-	secretKey := os.Getenv(key)
-
-	if secretKey == "" {
-		log.Fatal(key + " environment variable is not set")
+func getSecret(key string) (string, error) {
+	secret := os.Getenv(key)
+	if secret == "" {
+		return "", fmt.Errorf("%s is not set", key)
 	}
-
-	if len(secretKey) < minSecretLength {
-		log.Fatal(key + " is too short")
+	if len(secret) < minSecretLength {
+		return "", fmt.Errorf("%s is too short (need at least %d characters)", key, minSecretLength)
 	}
-
-	return secretKey
+	return secret, nil
 }

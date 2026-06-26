@@ -148,7 +148,7 @@ func (s *Service) DeleteTracks(ids []string) error {
 	for _, t := range tracks {
 		err := fs.DeleteFile(t.Path)
 		if err != nil {
-			s.log.Warn("Failed to delete track from disk: " + err.Error())
+			s.log.Warn("Failed to delete track from disk", "error", err, "track", t.Name)
 		}
 	}
 
@@ -223,19 +223,24 @@ func (s *Service) LoadTracksFromDisk(tracksDir string) ([]*Track, error) {
 		trackPath := filepath.Join(tracksDir, trackFilename)
 		preparedTrackPath, err := s.PrepareTrack(trackPath)
 		if err != nil {
-			s.log.Warn("Failed to prepare a track for streaming: "+err.Error(), "track", trackFilename)
+			s.log.Warn("Failed to prepare track for streaming", "error", err, "track", trackFilename)
 			continue
 		}
 
 		track, err := s.AddTrack(trackFilename, preparedTrackPath)
 		if err != nil {
-			s.log.Warn("Failed to save track to database: "+err.Error(), "track", trackFilename)
+			s.log.Warn("Failed to save track to database", "error", err, "track", trackFilename)
+			// AddTrack failed after PrepareTrack succeeded; clean up the prepared
+			// file so it doesn't accumulate on disk across restarts.
+			if removeErr := fs.DeleteFile(preparedTrackPath); removeErr != nil {
+				s.log.Warn("Failed to clean up orphaned prepared track", "error", removeErr, "track", trackFilename, "path", preparedTrackPath)
+			}
 			continue
 		}
 
 		err = fs.DeleteFile(trackPath)
 		if err != nil {
-			s.log.Warn("Failed to delete original copy of prepared track: "+err.Error(), "track", trackFilename)
+			s.log.Warn("Failed to delete original copy of prepared track", "error", err, "track", trackFilename)
 		}
 
 		tracks = append(tracks, track)

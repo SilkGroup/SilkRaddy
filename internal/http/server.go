@@ -30,6 +30,7 @@ type Server struct {
 	playbackService *playback.Service
 	playlistService *playlist.Service
 	stationService  *station.Service
+	storage         storage.Storage
 	config          *config.Config
 	logger          *slog.Logger
 	router          *http.ServeMux
@@ -54,19 +55,24 @@ func NewServer(store storage.Storage, conf *config.Config, logger *slog.Logger) 
 		playbackService: ps,
 		playlistService: pls,
 		stationService:  ss,
+		storage:         store,
 		config:          conf,
 		logger:          logger.WithGroup("http"),
 		router:          router,
 	}
 	s.httpServer = &http.Server{
 		Addr:    ":" + conf.HTTPPort,
-		Handler: cors.Default().Handler(router),
+		Handler: requestID(cors.Default().Handler(router)),
 	}
 	return s
 }
 
 func (s *Server) Run() {
 	s.registerMP2TMimeType()
+
+	// Health probes (public, no auth, no logging noise expected)
+	s.router.HandleFunc("GET /healthz", s.handleHealth)
+	s.router.HandleFunc("GET /readyz", s.handleReady)
 
 	// Public handlers
 	s.router.HandleFunc("GET /stream", s.handleHLSPlaylist)

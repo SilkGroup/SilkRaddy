@@ -1,6 +1,7 @@
 package http
 
 import (
+	"context"
 	"crypto/subtle"
 	"errors"
 	"fmt"
@@ -17,6 +18,25 @@ import (
 	"github.com/cheatsnake/airstation/internal/track"
 	"github.com/golang-jwt/jwt/v5"
 )
+
+// handleHealth is a liveness probe — returns 200 once the process has started.
+// It does not check downstream dependencies; that is what /readyz is for.
+func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
+	jsonResponse(w, map[string]string{"status": "ok"})
+}
+
+// handleReady is a readiness probe — returns 200 only when the storage backend
+// is reachable. Used by Cloud Run / Kubernetes to gate traffic. Object-store
+// and other downstream checks should be added here as those interfaces land.
+func (s *Server) handleReady(w http.ResponseWriter, r *http.Request) {
+	ctx, cancel := context.WithTimeout(r.Context(), 2*time.Second)
+	defer cancel()
+	if err := s.storage.Ping(ctx); err != nil {
+		jsonMessage(w, http.StatusServiceUnavailable, "storage unreachable: "+err.Error())
+		return
+	}
+	jsonResponse(w, map[string]string{"status": "ready"})
+}
 
 const multipartChunkLimit = 64 * 1024 * 1024 // 64 MB
 const copyBufferSize = 256 * 1024            // 256 KB

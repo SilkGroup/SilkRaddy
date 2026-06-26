@@ -19,7 +19,13 @@ import (
 )
 
 func main() {
-	conf := config.Load()
+	log := logger.New()
+
+	conf, err := config.Load()
+	if err != nil {
+		log.Error("Configuration error", "error", err)
+		os.Exit(1)
+	}
 
 	fs.DeleteDirIfExists(conf.TmpDir)
 	fs.MustDir(conf.TmpDir)
@@ -28,10 +34,9 @@ func main() {
 	stopSignal := make(chan os.Signal, 1)
 	signal.Notify(stopSignal, os.Interrupt, syscall.SIGTERM)
 
-	log := logger.New()
 	store, err := openStore(conf, log)
 	if err != nil {
-		log.Error("Failed connect to database: " + err.Error())
+		log.Error("Failed connect to database", "error", err)
 		os.Exit(1)
 	}
 

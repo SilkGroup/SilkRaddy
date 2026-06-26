@@ -5,6 +5,7 @@
 package postgres
 
 import (
+	"context"
 	"database/sql"
 	"fmt"
 	"log/slog"
@@ -58,6 +59,10 @@ func New(dsn string, log *slog.Logger) (*Instance, error) {
 	instance.StationStore = NewStationStore(db)
 
 	return instance, nil
+}
+
+func (ins *Instance) Ping(ctx context.Context) error {
+	return ins.db.PingContext(ctx)
 }
 
 func (ins *Instance) Close() error {
