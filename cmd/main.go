@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"log/slog"
 	"os"
 	"os/signal"
@@ -10,6 +12,9 @@ import (
 	"time"
 
 	"github.com/cheatsnake/airstation/internal/config"
+	"github.com/cheatsnake/airstation/internal/filestore"
+	"github.com/cheatsnake/airstation/internal/filestore/gcs"
+	"github.com/cheatsnake/airstation/internal/filestore/local"
 	"github.com/cheatsnake/airstation/internal/http"
 	"github.com/cheatsnake/airstation/internal/logger"
 	"github.com/cheatsnake/airstation/internal/pkg/fs"
@@ -40,11 +45,36 @@ func main() {
 		os.Exit(1)
 	}
 
+	fileStore, err := openFileStore(context.Background(), conf, log)
+	if err != nil {
+		log.Error("Failed to open file store", "error", err)
+		os.Exit(1)
+	}
+
 	httpServer := http.NewServer(store, conf, log)
 	go httpServer.Run()
 
 	<-stopSignal
-	shutdown(log, store, httpServer)
+	shutdown(log, store, fileStore, httpServer)
+}
+
+// openFileStore picks the FileStore backend based on SILKRADDY_FILESTORE_DRIVER.
+// Default is "local" so existing self-host deploys are unaffected. The "gcs"
+// driver requires SILKRADDY_FILESTORE_BUCKET to be set.
+func openFileStore(ctx context.Context, conf *config.Config, log *slog.Logger) (filestore.FileStore, error) {
+	switch conf.FileStoreDriver {
+	case "", "local":
+		log.Info("FileStore: local", "root", conf.TracksDir)
+		return local.New(conf.TracksDir, "/static/tracks")
+	case "gcs":
+		if conf.FileStoreBucket == "" {
+			return nil, errors.New("SILKRADDY_FILESTORE_BUCKET is required when SILKRADDY_FILESTORE_DRIVER=gcs")
+		}
+		log.Info("FileStore: gcs", "bucket", conf.FileStoreBucket)
+		return gcs.New(ctx, conf.FileStoreBucket, conf.FileStoreServiceAccount)
+	default:
+		return nil, fmt.Errorf("unknown SILKRADDY_FILESTORE_DRIVER: %s", conf.FileStoreDriver)
+	}
 }
 
 // openStore picks the storage backend based on AIRSTATION_DB_DRIVER. The
@@ -80,18 +110,24 @@ func (e *unknownDriverError) Error() string {
 	return "unknown AIRSTATION_DB_DRIVER: " + e.driver
 }
 
-func shutdown(log *slog.Logger, store storage.Storage, httpServer *http.Server) {
+func shutdown(log *slog.Logger, store storage.Storage, fileStore filestore.FileStore, httpServer *http.Server) {
 	println()
 	log.Info("Shutting down the app...")
 
 	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
 	defer cancel()
 	if err := httpServer.Shutdown(ctx); err != nil {
-		log.Error("HTTP server shutdown failed: " + err.Error())
+		log.Error("HTTP server shutdown failed", "error", err)
+	}
+
+	if c, ok := fileStore.(interface{ Close() error }); ok {
+		if err := c.Close(); err != nil {
+			log.Error("Failed to close file store", "error", err)
+		}
 	}
 
 	if err := store.Close(); err != nil {
-		log.Error("Failed to close database connection: " + err.Error())
+		log.Error("Failed to close database connection", "error", err)
 	}
 
 	log.Info("App gracefully stopped")

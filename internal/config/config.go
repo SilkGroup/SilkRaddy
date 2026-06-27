@@ -13,10 +13,23 @@ import (
 const minSecretLength = 10
 
 type Config struct {
-	DBDriver     string
-	DBDir        string
-	DBFile       string
-	PostgresURL  string
+	DBDriver string
+	DBDir    string
+	DBFile   string
+
+	PostgresURL string
+
+	// FileStore — Phase C. Driver is "local" (default) or "gcs".
+	FileStoreDriver         string
+	FileStoreBucket         string
+	FileStoreServiceAccount string
+
+	// MultiTenant — Phase B foundation feature flag. When false, the legacy
+	// shared-secret login + single-tenant behaviour is preserved. When true,
+	// the new tenants/users/memberships tables are used and login switches
+	// to email + password.
+	MultiTenant bool
+
 	TracksDir    string
 	TmpDir       string
 	PlayerDir    string
@@ -45,10 +58,18 @@ func Load() (*Config, error) {
 	}
 
 	cfg := &Config{
-		DBDriver:     getEnv("AIRSTATION_DB_DRIVER", "sqlite"),
-		DBDir:        getEnv("AIRSTATION_DB_DIR", filepath.Join("storage")),
-		DBFile:       getEnv("AIRSTATION_DB_FILE", "storage.db"),
-		PostgresURL:  getEnv("AIRSTATION_POSTGRES_URL", ""),
+		DBDriver: getEnv("AIRSTATION_DB_DRIVER", "sqlite"),
+		DBDir:    getEnv("AIRSTATION_DB_DIR", filepath.Join("storage")),
+		DBFile:   getEnv("AIRSTATION_DB_FILE", "storage.db"),
+
+		PostgresURL: getEnv("AIRSTATION_POSTGRES_URL", ""),
+
+		FileStoreDriver:         getEnv("SILKRADDY_FILESTORE_DRIVER", "local"),
+		FileStoreBucket:         getEnv("SILKRADDY_FILESTORE_BUCKET", ""),
+		FileStoreServiceAccount: getEnv("SILKRADDY_FILESTORE_SERVICE_ACCOUNT", ""),
+
+		MultiTenant: getEnvBool("SILKRADDY_MULTI_TENANT", false),
+
 		TracksDir:    getEnv("AIRSTATION_TRACKS_DIR", filepath.Join("static", "tracks")),
 		TmpDir:       getEnv("AIRSTATION_TMP_DIR", filepath.Join("static", "tmp")),
 		PlayerDir:    getEnv("AIRSTATION_PLAYER_DIR", filepath.Join("web", "player", "dist")),

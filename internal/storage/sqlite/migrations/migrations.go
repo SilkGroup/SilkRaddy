@@ -88,4 +88,65 @@ var migrations = []Migration{
 			return nil
 		},
 	},
+	{
+		// Phase B foundation: tenants, users, memberships, api_tokens,
+		// audit_log. The tables exist whether or not the binary is running
+		// in multi-tenant mode; legacy single-tenant paths simply don't
+		// reference them.
+		Version: 3,
+		Name:    "create_multi_tenant_tables",
+		Up: func(tx *sql.Tx) error {
+			queries := []string{
+				`CREATE TABLE IF NOT EXISTS tenants (
+				    id TEXT PRIMARY KEY,
+				    name TEXT NOT NULL,
+				    slug TEXT NOT NULL UNIQUE,
+				    created_at INTEGER NOT NULL DEFAULT (strftime('%s', 'now'))
+				);`,
+				`CREATE TABLE IF NOT EXISTS users (
+				    id TEXT PRIMARY KEY,
+				    email TEXT NOT NULL UNIQUE,
+				    password_hash TEXT NOT NULL,
+				    email_verified INTEGER NOT NULL DEFAULT 0,
+				    created_at INTEGER NOT NULL DEFAULT (strftime('%s', 'now'))
+				);`,
+				`CREATE TABLE IF NOT EXISTS memberships (
+				    user_id TEXT NOT NULL,
+				    tenant_id TEXT NOT NULL,
+				    role TEXT NOT NULL,
+				    PRIMARY KEY (user_id, tenant_id),
+				    FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
+				    FOREIGN KEY (tenant_id) REFERENCES tenants(id) ON DELETE CASCADE
+				);`,
+				`CREATE TABLE IF NOT EXISTS api_tokens (
+				    id TEXT PRIMARY KEY,
+				    user_id TEXT NOT NULL,
+				    token_hash TEXT NOT NULL UNIQUE,
+				    scopes TEXT NOT NULL,
+				    expires_at INTEGER,
+				    created_at INTEGER NOT NULL DEFAULT (strftime('%s', 'now')),
+				    FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+				);`,
+				`CREATE TABLE IF NOT EXISTS audit_log (
+				    id INTEGER PRIMARY KEY AUTOINCREMENT,
+				    ts INTEGER NOT NULL DEFAULT (strftime('%s', 'now')),
+				    actor_id TEXT,
+				    tenant_id TEXT,
+				    action TEXT NOT NULL,
+				    resource TEXT,
+				    old_value TEXT,
+				    new_value TEXT,
+				    ip TEXT
+				);`,
+				`CREATE INDEX IF NOT EXISTS idx_audit_log_tenant_ts ON audit_log(tenant_id, ts DESC);`,
+				`CREATE INDEX IF NOT EXISTS idx_memberships_tenant ON memberships(tenant_id);`,
+			}
+			for _, q := range queries {
+				if _, err := tx.Exec(q); err != nil {
+					return fmt.Errorf("failed to execute query: %w, query: %s", err, q)
+				}
+			}
+			return nil
+		},
+	},
 }

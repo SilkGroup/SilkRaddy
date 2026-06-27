@@ -11,7 +11,9 @@ at the end of each, not just at the end of the whole plan.
 
 ---
 
-## Phase A — Foundations
+## Phase A — Foundations  ✅ partially landed
+
+**Status:** A1, A2 (partial — JSON logging was already in place; request_id middleware added), A3, A5, A7 are merged. A4 (runtime player branding) and A6 (module rename) are queued — both require frontend or cross-cutting diffs better handled in their own PRs.
 
 **Goal:** make the existing single-tenant app safe to operate as a
 managed service, with the seams in place for multi-tenancy and billing
@@ -39,7 +41,9 @@ FR-BRD-1 (partial), most of §4.3 (security baseline).
 
 ---
 
-## Phase B — Multi-tenancy
+## Phase B — Multi-tenancy  🟡 foundation landed
+
+**Status:** schema migrations (`tenants`, `users`, `memberships`, `api_tokens`, `audit_log`) are in tree for both sqlite and postgres at version 3. `internal/auth/` package shipped with argon2id password hashing, RBAC matrix from SRS §3.1.1, session context helpers, and unit tests. **NOT YET LANDED:** RLS policies, login refactor, per-row tenant_id columns on existing data tables, audit-log writer integration. These are the remaining (and largest) bulk of Phase B and were intentionally deferred to a focused follow-up PR because they touch every Store query.
 
 **Goal:** add the `tenant_id` axis that everything in Phase C–F
 assumes. Until this lands, billing is meaningless because there is
@@ -67,7 +71,9 @@ FR-STN-1, FR-STN-2, FR-OPS-2 (`tenant_id` on every log line).
 
 ---
 
-## Phase C — Object storage and CDN
+## Phase C — Object storage and CDN  ✅ interface + impls landed
+
+**Status:** `internal/filestore/` interface shipped with `local` and `gcs` implementations and unit tests for `local`. `local` integrates with the existing `/static/tracks/` URL space via `PublicBaseURL`. `gcs` uses V4 signed URLs via IAM Credentials SignBlob (no key file required on Cloud Run). Wired through `cmd/main.go` behind `SILKRADDY_FILESTORE_DRIVER`. **NOT YET LANDED:** refactoring the track upload handler and the HLS-segment writer in `playback` to use the interface — that is the integration step that actually moves bytes off ephemeral disk. Today the FileStore is constructed but no callers use it. Follow-up PR.
 
 **Goal:** take the listener data path off the application server.
 
@@ -89,7 +95,9 @@ CDN. The Cloud Run service `--max-instances` cap is lifted.
 
 ---
 
-## Phase D — Self-serve onboarding
+## Phase D — Self-serve onboarding  🟦 scaffold only
+
+**Status:** `internal/onboarding/` package created with `SignupRequest`, `CustomDomainRequest` types and handler stubs that return 501. Nothing is wired into the HTTP server. Real implementation is a follow-up PR.
 
 **Goal:** a stranger can land on the marketing site, sign up, and have
 a working station with a custom subdomain in five minutes.
@@ -112,7 +120,9 @@ through FR-BRD-3.
 
 ---
 
-## Phase E — Billing
+## Phase E — Billing  🟦 scaffold only
+
+**Status:** `internal/billing/` package created with `PlanID`, `Plan`, `Subscription`, `Meter` types and a `Catalogue()` function returning the SRS §6 plan grid. No Stripe wiring, no entitlement enforcement. Real implementation is a follow-up PR.
 
 **Goal:** charge customers.
 
@@ -133,7 +143,9 @@ appears on the next invoice.
 
 ---
 
-## Phase F — Product depth
+## Phase F — Product depth  🟦 scaffold only
+
+**Status:** `internal/scheduler/` package created with `Programme`, `RecurrenceRule`, `Resolver` types. No analytics, no bulk importer. Real implementation is a follow-up PR.
 
 **Goal:** features that turn the product from "viable" to "preferred."
 
@@ -153,7 +165,9 @@ documented; SLA can be raised to 99.9%.
 
 ---
 
-## Phase G — Compliance and legal
+## Phase G — Compliance and legal  🟦 scaffold only
+
+**Status:** `internal/compliance/` package created with `Spin` struct (the licensing-body schema) and `ExportCSV` (generic CSV writer with unit tests). Per-society template formatters (ASCAP, BMI, PRS, SOCAN, SACEM) and GDPR data-export/delete endpoints are follow-up.
 
 **Goal:** be safe to sell to a mid-market hospitality chain or
 European company.
@@ -176,7 +190,9 @@ retention, §4.3 security baseline upgrades.
 
 ---
 
-## Phase H — Scale-out
+## Phase H — Scale-out  🟦 scaffold only
+
+**Status:** `internal/scale/` package created (doc-only). Design work pending; no code.
 
 **Goal:** lift the constraints that the v1 architecture leaves in
 place.

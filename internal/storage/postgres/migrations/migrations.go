@@ -90,4 +90,61 @@ var migrations = []Migration{
 			return nil
 		},
 	},
+	{
+		// Phase B foundation: multi-tenancy tables. Postgres uses BIGINT
+		// epoch timestamps for parity with sqlite (strftime('%s','now')) so
+		// joins across timestamp columns behave the same.
+		Version: 3,
+		Name:    "create_multi_tenant_tables",
+		Up: func(tx *sql.Tx) error {
+			queries := []string{
+				`CREATE TABLE IF NOT EXISTS tenants (
+				    id TEXT PRIMARY KEY,
+				    name TEXT NOT NULL,
+				    slug TEXT NOT NULL UNIQUE,
+				    created_at BIGINT NOT NULL DEFAULT EXTRACT(EPOCH FROM NOW())::BIGINT
+				);`,
+				`CREATE TABLE IF NOT EXISTS users (
+				    id TEXT PRIMARY KEY,
+				    email TEXT NOT NULL UNIQUE,
+				    password_hash TEXT NOT NULL,
+				    email_verified BOOLEAN NOT NULL DEFAULT FALSE,
+				    created_at BIGINT NOT NULL DEFAULT EXTRACT(EPOCH FROM NOW())::BIGINT
+				);`,
+				`CREATE TABLE IF NOT EXISTS memberships (
+				    user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+				    tenant_id TEXT NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+				    role TEXT NOT NULL,
+				    PRIMARY KEY (user_id, tenant_id)
+				);`,
+				`CREATE TABLE IF NOT EXISTS api_tokens (
+				    id TEXT PRIMARY KEY,
+				    user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+				    token_hash TEXT NOT NULL UNIQUE,
+				    scopes TEXT NOT NULL,
+				    expires_at BIGINT,
+				    created_at BIGINT NOT NULL DEFAULT EXTRACT(EPOCH FROM NOW())::BIGINT
+				);`,
+				`CREATE TABLE IF NOT EXISTS audit_log (
+				    id BIGSERIAL PRIMARY KEY,
+				    ts BIGINT NOT NULL DEFAULT EXTRACT(EPOCH FROM NOW())::BIGINT,
+				    actor_id TEXT,
+				    tenant_id TEXT,
+				    action TEXT NOT NULL,
+				    resource TEXT,
+				    old_value TEXT,
+				    new_value TEXT,
+				    ip TEXT
+				);`,
+				`CREATE INDEX IF NOT EXISTS idx_audit_log_tenant_ts ON audit_log (tenant_id, ts DESC);`,
+				`CREATE INDEX IF NOT EXISTS idx_memberships_tenant ON memberships (tenant_id);`,
+			}
+			for _, q := range queries {
+				if _, err := tx.Exec(q); err != nil {
+					return fmt.Errorf("failed to execute query: %w, query: %s", err, q)
+				}
+			}
+			return nil
+		},
+	},
 }
