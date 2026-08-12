@@ -159,7 +159,20 @@ white-labelled web player or embedded widget.
 | FR-OPS-5 | Public status page (`status.silkraddy.app`) with at minimum: API uptime, ingest queue health, streaming p95 latency. |
 | FR-OPS-6 | DB has automated daily backups retained ≥ 35 days; restore drill documented and executed quarterly. |
 
-### 3.8 Compliance and legal
+### 3.8 Security controls (baseline)
+
+| ID | Requirement |
+| --- | --- |
+| FR-SEC-1 | The login endpoint enforces a per-client-IP token-bucket rate limit (default 10 requests burst, 5 per minute refill). Rejections return `429 Too Many Requests` with a `Retry-After` header. Configurable via `SILKRADDY_LOGIN_RATE_BURST` / `SILKRADDY_LOGIN_RATE_REFILL_PER_MIN`. |
+| FR-SEC-2 | Multipart upload endpoints cap total request body size via `http.MaxBytesReader` (default 2 GiB). Excess returns `413 Request Entity Too Large`. Configurable via `SILKRADDY_MAX_UPLOAD_BYTES`; `0` disables the cap. |
+| FR-SEC-3 | Uploaded filenames are sanitised via `filepath.Base`; empty, `.`, or `/` names are rejected. Collisions on the target path receive a short random suffix before the extension so concurrent uploads with the same name do not overwrite one another. |
+| FR-SEC-4 | The SSE broadcaster is non-blocking. A subscriber whose channel is full has its event dropped rather than stalling every other consumer. Slow subscribers are logged for operator diagnosis. |
+| FR-SEC-5 | HLS playlist responses set `Cache-Control: no-cache, no-store, must-revalidate` and return `503 Service Unavailable` when playback is stopped, so listeners retry rather than loop a stale window. |
+| FR-SEC-6 | CORS is configurable per-deployment via `SILKRADDY_CORS_ORIGINS` (comma-separated origin allowlist). Empty preserves the legacy permissive default for backward compatibility with self-host deploys; production deploys must set this. |
+| FR-SEC-7 | The authentication cookie is `HttpOnly`, `SameSite=Strict`, path-scoped to `/`, and `Secure` when `AIRSTATION_SECURE_COOKIE=true`. |
+| FR-SEC-8 | Failed uploads roll back partial writes so aborted requests do not litter the tracks directory with half-processed files. Multipart temp files are cleaned via `deferred MultipartForm.RemoveAll()`. |
+
+### 3.9 Compliance and legal
 
 | ID | Requirement |
 | --- | --- |
@@ -263,7 +276,113 @@ the billing schema and limit-enforcement code have a concrete target.
 
 ---
 
-## 7. Cross-references
+## 7. Candidate next features (post-v1 backlog)
+
+Ranked by an entrepreneurial value/effort ratio, not by engineering
+interest. Each candidate is written so a product manager can ask
+"is this the next thing to build?" and get a defensible answer.
+
+### 7.1 Live DJ mic-in over WebRTC  **[High value / High effort]**
+
+Operators can go on-air with a browser mic, cross-fading over the
+scheduled programme. Unlocks the "morning show" use case that hospitality
+and community broadcasters actually pay for. Effort is high because it
+adds a WebRTC gateway (Pion), a mixer stage in ffmpeg, and a talk-over
+UI in the studio. Ships two customer segments (community broadcasters,
+event radio).
+
+### 7.2 Podcasting / RSS feed publishing  **[High value / Medium effort]**
+
+Any station can also expose a podcast RSS feed of its recorded shows
+(iTunes Connect-compatible). Zero new engineering on ingestion (we
+already have processed audio); needs an RSS generator, an episode
+model, and Apple/Spotify submission docs. Doubles the addressable
+market — "internet radio + podcast host" beats "just internet radio"
+in a pricing comparison.
+
+### 7.3 Listener requests & voting  **[Medium value / Low effort]**
+
+Listeners on the player can request tracks or up/down-vote what's
+playing. Operators see aggregated results in the studio and choose
+whether to act. Cheap engineering (a `requests` table, a REST endpoint,
+an SSE event) that dramatically increases listener engagement metrics
+and gives operators content for social posts ("your top-voted tracks
+this week").
+
+### 7.4 Ad insertion / dynamic swap  **[High value / High effort]**
+
+Operators can define ad slots (pre-roll, mid-roll every N minutes) and
+either upload creatives or plug in a programmatic ad server. Required
+by any broadcaster who wants to monetise the stream directly. Effort
+is high because it requires precise segment splicing in the playback
+engine and an ad-serving abstraction; regulatory nuance around
+targeting rules in different territories.
+
+### 7.5 Now-playing webhooks / Discord / Slack  **[Medium value / Low effort]**
+
+Every track change fires a webhook. Prebuilt integrations for Discord,
+Slack, and generic HTTP. Community stations get free promotion into
+their Discord servers; corporate stations post now-playing into
+`#music` channels. Effort is a webhook subscription table + a
+delivery worker with retries.
+
+### 7.6 Smart speaker / Alexa / Google Home skills  **[Medium value / High effort]**
+
+Listeners tell their smart speaker "play Acme Radio." Requires per-
+platform certification, per-station SkillIDs, and a routing layer. High
+effort per platform, but strategically important for hospitality
+customers (hotel-room voice assistants).
+
+### 7.7 AI-assisted programming  **[Low value / Medium effort]**
+
+BPM matching, mood detection, "auto-DJ" for filler blocks between
+scheduled shows. Nice differentiator; probably not the reason anyone
+pays. Effort is medium: bring in a tag/classify pipeline (Whisper for
+speech, a music-tagging model for audio features).
+
+### 7.8 Native mobile apps  **[Medium value / Very high effort]**
+
+iOS + Android native apps for both operators (studio) and listeners
+(player). Deferred because the PWA covers 80% of it at 5% of the cost;
+revisit when a mid-market customer signs an ACV that justifies a
+$150k+ mobile investment.
+
+### 7.9 Multi-language player UI  **[Medium value / Low effort]**
+
+Player copy localised via i18next; operator picks default locale per
+station; listener can override. Unlocks non-English markets. Real
+work is the translations, not the code.
+
+### 7.10 Embeddable partner widgets  **[Medium value / Low effort]**
+
+A `<script src="…/embed.js">` snippet that mounts a styled player on
+any site with `postMessage` control API. Turns every operator's blog /
+press site into a distribution channel. Ships with Phase D branding
+work naturally.
+
+### 7.11 Analytics dashboard  **[High value / Medium effort]**
+
+Beyond the operator-facing analytics in SRS §3.5, ship a public,
+tenant-branded stats page ("we broadcast to 1.2M listeners this month
+across 47 countries") that operators can embed on their marketing
+site. Free growth loop.
+
+### 7.12 Prioritisation framework
+
+For each candidate, the founder decides on **three axes** before
+scheduling engineering:
+
+1. **Which target-segment(s)** does it unlock?
+2. **Does it change the pricing tier ceiling** or move customers up-plan?
+3. **What is the smallest shippable slice** (thin vertical, not full feature)?
+
+The default sequencing that falls out of that framework today is:
+**7.2 podcasting → 7.3 requests → 7.10 embed widget → 7.9 i18n → 7.5
+webhooks → 7.1 live DJ → 7.4 ads → 7.6 smart speakers → 7.11 public
+analytics → 7.7 AI → 7.8 native mobile.** This is a starting point,
+not a commitment.
+
+## 8. Cross-references
 
 - Current-state critique: `docs/critique.md`
 - Phased corrective roadmap: `docs/saas-roadmap.md`

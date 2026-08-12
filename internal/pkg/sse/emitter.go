@@ -1,41 +1,48 @@
 package sse
 
 import (
+	"log/slog"
 	"sync"
 )
 
 // Emitter manages a set of subscribers and broadcasts events to them.
+//
+// Sends are non-blocking: if a subscriber's channel is full the event is
+// dropped for that subscriber rather than blocking every other consumer. The
+// slow subscriber gets a diagnostic log line so operators can spot it.
 type Emitter struct {
-	subscribers sync.Map // A thread-safe map storing subscriber channels.
+	subscribers sync.Map // key: chan *Event → value: bool (present)
+	log         *slog.Logger
 }
 
 // NewEmitter creates and returns a new Emitter instance.
-//
-// Returns:
-//   - A pointer to a new Emitter.
 func NewEmitter() *Emitter {
 	return &Emitter{}
 }
 
-// RegisterEvent broadcasts an event with the specified name and data
-// to all currently subscribed channels.
-//
-// Parameters:
-//   - name: The event name/type.
-//   - data: The string payload of the event.
+// SetLogger attaches a logger used to report dropped events. Optional.
+func (ee *Emitter) SetLogger(log *slog.Logger) {
+	ee.log = log
+}
+
+// RegisterEvent broadcasts an event to every subscriber. If a subscriber's
+// channel is full the event is dropped for that subscriber only.
 func (ee *Emitter) RegisterEvent(name, data string) {
 	event := NewEvent(name, data)
 	ee.subscribers.Range(func(key, value any) bool {
 		eventChan := key.(chan *Event)
-		eventChan <- event
+		select {
+		case eventChan <- event:
+		default:
+			if ee.log != nil {
+				ee.log.Warn("sse: dropped event to slow subscriber", "event", name)
+			}
+		}
 		return true
 	})
 }
 
 // CountSubscribers returns the number of currently active subscribers.
-//
-// Returns:
-//   - An integer count of subscriber channels.
 func (ee *Emitter) CountSubscribers() int {
 	count := 0
 	ee.subscribers.Range(func(key, value any) bool {
@@ -45,18 +52,14 @@ func (ee *Emitter) CountSubscribers() int {
 	return count
 }
 
-// Subscribe adds a new subscriber channel to receive events.
-//
-// Parameters:
-//   - eventChan: A channel to which events will be sent.
+// Subscribe adds a subscriber channel to receive events. The channel should
+// be buffered (see http handler) so the non-blocking send in RegisterEvent
+// has somewhere to land.
 func (ee *Emitter) Subscribe(eventChan chan *Event) {
 	ee.subscribers.Store(eventChan, true)
 }
 
 // Unsubscribe removes a previously added subscriber channel.
-//
-// Parameters:
-//   - eventChan: The channel to remove from the list of subscribers.
 func (ee *Emitter) Unsubscribe(eventChan chan *Event) {
 	ee.subscribers.Delete(eventChan)
 }

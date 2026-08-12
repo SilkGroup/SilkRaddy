@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 
 	"github.com/joho/godotenv"
@@ -23,6 +24,21 @@ type Config struct {
 	FileStoreDriver         string
 	FileStoreBucket         string
 	FileStoreServiceAccount string
+
+	// CORS. Comma-separated origin allowlist. Empty preserves the legacy
+	// permissive default (any origin) for backward compatibility with
+	// self-host deploys where the studio and player are on the same host as
+	// the API. Production deploys should set this.
+	CORSAllowedOrigins string
+
+	// MaxUploadBytes caps request body size for track uploads to prevent
+	// disk-fill DoS. 0 preserves the legacy no-limit behaviour.
+	MaxUploadBytes int64
+
+	// LoginRateBurst / LoginRateRefillPerMin control the per-IP login
+	// rate limiter. Defaults are chosen for a human retrying a password.
+	LoginRateBurst       int
+	LoginRateRefillPerMin int
 
 	// MultiTenant — Phase B foundation feature flag. When false, the legacy
 	// shared-secret login + single-tenant behaviour is preserved. When true,
@@ -68,6 +84,15 @@ func Load() (*Config, error) {
 		FileStoreBucket:         getEnv("SILKRADDY_FILESTORE_BUCKET", ""),
 		FileStoreServiceAccount: getEnv("SILKRADDY_FILESTORE_SERVICE_ACCOUNT", ""),
 
+		CORSAllowedOrigins: getEnv("SILKRADDY_CORS_ORIGINS", ""),
+
+		// Default: 2 GiB total per multipart upload — big enough for a full
+		// live-set recording, small enough to protect ephemeral disk. Set 0
+		// via env to disable.
+		MaxUploadBytes:        getEnvInt64("SILKRADDY_MAX_UPLOAD_BYTES", 2*1024*1024*1024),
+		LoginRateBurst:        int(getEnvInt64("SILKRADDY_LOGIN_RATE_BURST", 10)),
+		LoginRateRefillPerMin: int(getEnvInt64("SILKRADDY_LOGIN_RATE_REFILL_PER_MIN", 5)),
+
 		MultiTenant: getEnvBool("SILKRADDY_MULTI_TENANT", false),
 
 		TracksDir:    getEnv("AIRSTATION_TRACKS_DIR", filepath.Join("static", "tracks")),
@@ -101,6 +126,18 @@ func getEnvBool(key string, defaultValue bool) bool {
 
 	val = strings.ToLower(val)
 	return val == "1" || val == "true" || val == "yes" || val == "on"
+}
+
+func getEnvInt64(key string, defaultValue int64) int64 {
+	val := os.Getenv(key)
+	if val == "" {
+		return defaultValue
+	}
+	parsed, err := strconv.ParseInt(val, 10, 64)
+	if err != nil {
+		return defaultValue
+	}
+	return parsed
 }
 
 func getSecret(key string) (string, error) {

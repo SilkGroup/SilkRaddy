@@ -11,27 +11,38 @@ what it is being repositioned as.
 Severity legend: **P0** = blocks the business; **P1** = blocks scale;
 **P2** = blocks growth or NPS; **P3** = polish.
 
+Status legend on findings: **✅** landed on this branch; **🟡** foundation
+landed, integration follow-up; **🟦** scaffold only; no marker = not yet
+addressed.
+
 ---
 
 ## 1 — Technical design
 
 | # | Finding | Severity | Evidence |
 | --- | --- | --- | --- |
-| T1 | **Single-tenant data model.** There is no `tenant_id` or `organization_id` on any row. One database = one station. To serve N companies you have to deploy N copies. | **P0** | `internal/storage/sqlite/migrations/*.sql`, every `*.go` Store implementation |
-| T2 | **No user accounts; single shared admin password.** Login is "send the `AIRSTATION_SECRET_KEY` env var as a password." No per-user identity, no audit log of who did what, no revocation without rotating the secret and re-deploying. | **P0** | `internal/http/handlers.go` `handleLogin`, `internal/config/config.go` `AIRSTATION_SECRET_KEY` |
-| T3 | **No RBAC.** Every admin can do every admin thing. No "DJ can only manage queue, not delete tracks" or "Viewer can see analytics but not change anything." | **P0** | `internal/http/server.go` `jwtAuth` middleware (single tier) |
-| T4 | **In-process singleton playback state.** `playback.State` lives in one Go process; the playback goroutine is the source of truth for which segment is on-air. You cannot horizontally scale, you cannot fail over, and `--max-instances 1` is a hard ceiling. | **P0** | `internal/playback/state.go`, `cmd/main.go` (one `httpServer.Run()`) |
-| T5 | **Track and HLS storage on ephemeral container disk.** Already on the roadmap as Phase 2, but worth re-flagging — any cold start / new revision orphans every track row in the DB. | P0 (until Phase 2) | `static/tracks/`, `static/tmp/`, `internal/config/config.go` defaults |
+| T1 | **Single-tenant data model.** 🟡 Foundation landed (`tenants`/`users`/`memberships`/`api_tokens`/`audit_log` tables in migration v3). Per-row `tenant_id` columns and query refactors are the follow-up. | **P0** | `internal/storage/sqlite/migrations/*.sql`, every `*.go` Store implementation |
+| T2 | **No user accounts; single shared admin password.** 🟡 argon2id + RBAC types shipped in `internal/auth/`; login refactor gated behind `SILKRADDY_MULTI_TENANT` is the follow-up. | **P0** | `internal/http/handlers.go` `handleLogin`, `internal/config/config.go` `AIRSTATION_SECRET_KEY` |
+| T3 | **No RBAC.** 🟡 Role / Permission matrix from SRS §3.1.1 shipped in `internal/auth/types.go` with unit tests; middleware wiring is the follow-up. | **P0** | `internal/http/server.go` `jwtAuth` middleware (single tier) |
+| T4 | **In-process singleton playback state.** Deferred to Phase H. `playback.State` lives in one Go process; the playback goroutine is the source of truth for which segment is on-air. You cannot horizontally scale, you cannot fail over, and `--max-instances 1` is a hard ceiling. | **P0** | `internal/playback/state.go`, `cmd/main.go` (one `httpServer.Run()`) |
+| T5 | **Track and HLS storage on ephemeral container disk.** 🟡 `FileStore` interface + `local` + `gcs` impls shipped in `internal/filestore/`. Refactor of the upload/HLS-writer callers to use it is the follow-up. | P0 (until Phase C integrates) | `static/tracks/`, `static/tmp/`, `internal/config/config.go` defaults |
 | T6 | **No API contract.** No OpenAPI / Swagger / Protobuf; route table is hand-rolled at `server.go:62-91`. Companies integrating their CMS / ad server / EAS can't trust the surface. | P1 | `internal/http/server.go` |
-| T7 | **No observability primitives.** No metrics endpoint, no traces, no `request_id` propagation, no SLO budget. `slog` output is human-readable text, not JSON, so it doesn't ingest cleanly into Cloud Logging / Datadog without a parser. | P1 | absence; `internal/logger/` |
-| T8 | **No rate limiting, no abuse protection.** A public-facing multi-tenant service with public listener URLs and no per-tenant ingress controls is trivial to weaponize as bandwidth-amp / hotlinking. | P1 | absence |
-| T9 | **No CI/CD.** No `.github/workflows/`, no test gate on PRs. The original code review for issue #26 surfaced a small but real bug; future regressions will land the same way. | P1 | absence |
-| T10 | **Monolithic deployable.** Ingestion (ffmpeg, CPU-heavy, bursty) and streaming (HTTP segment serving, long-lived, lightweight) are the same binary. For a SaaS you want them split so the streaming tier scales by listener count and the ingest tier scales by upload volume — independently. | P2 | `cmd/main.go` |
+| T7 | **No observability primitives.** ✅ `/healthz`, `/readyz`, `X-Request-Id` middleware landed. JSON slog was already in place. Prometheus metrics endpoint + traces remain in Phase A backlog. | P1 (partial) | `internal/logger/`, `internal/http/handlers.go` (health), `internal/http/middlewares.go` (request_id) |
+| T8 | **No rate limiting, no abuse protection.** ✅ Per-IP token-bucket limiter on `/api/v1/login` shipped in `internal/http/ratelimit.go` (FR-SEC-1). Per-tenant listener limiting is Phase B follow-up. | P1 (partial) | `internal/http/ratelimit.go`, `internal/http/server.go` |
+| T9 | **No CI/CD.** ✅ `.github/workflows/ci.yml` runs `go build/vet/test -race` + `npm run build` for both frontends on every PR and push. | P1 | `.github/workflows/ci.yml` |
+| T10 | **Monolithic deployable.** Ingestion (ffmpeg, CPU-heavy, bursty) and streaming (HTTP segment serving, long-lived, lightweight) are the same binary. For a SaaS you want them split so the streaming tier scales by listener count and the ingest tier scales by upload volume — independently. Deferred to Phase H. | P2 | `cmd/main.go` |
 | T11 | **No backup / DR plan.** Cloud SQL has snapshots if enabled, but there's no documented restore drill and no off-region copy. | P2 | absence |
-| T12 | **Secrets validation is `log.Fatal`.** `AIRSTATION_JWT_SIGN`/`AIRSTATION_SECRET_KEY` missing-or-short → process exits. Fine for self-host, undignified for a managed service where startup errors should surface as structured logs and a non-zero exit code, not `log.Fatal` from a config package. | P3 | `internal/config/config.go` `getSecret` |
-| T13 | **Player title hard-baked into the JS bundle at build time** (`AIRSTATION_PLAYER_TITLE` is a Dockerfile `ARG`). Per-tenant branding requires a rebuild per tenant. | P1 | `Dockerfile:5-7` |
-| T14 | **CORS is wide-open (`cors.Default()`).** Acceptable for an embeddable player on someone else's site, but not configurable per-tenant. | P2 | `internal/http/server.go:104` |
+| T12 | **Secrets validation is `log.Fatal`.** ✅ `config.Load()` now returns `(*Config, error)` via `errors.Join`; `main` logs a structured error and exits cleanly. | P3 | `internal/config/config.go` `getSecret` |
+| T13 | **Player title hard-baked into the JS bundle at build time** (`AIRSTATION_PLAYER_TITLE` is a Dockerfile `ARG`). Per-tenant branding requires a rebuild per tenant. Frontend follow-up (Phase A4). | P1 | `Dockerfile:5-7` |
+| T14 | **CORS is wide-open (`cors.Default()`).** ✅ Configurable via `SILKRADDY_CORS_ORIGINS` comma-separated allowlist (FR-SEC-6); empty preserves legacy behaviour. | P2 | `internal/http/server.go` `configuredCORS` |
 | T15 | **No content protection.** HLS playlists and segments are reachable by anyone who guesses the URL. For commercial radio with licensed content, this is a hard licensing blocker. | P1 | `internal/http/handlers.go` `handleHLSPlaylist`, `handleStaticDir` |
+| T16 | **Multipart upload has no total-size cap.** ✅ `http.MaxBytesReader` cap (default 2 GiB, tunable via `SILKRADDY_MAX_UPLOAD_BYTES`) prevents disk-fill DoS (FR-SEC-2). | P1 | `internal/http/handlers.go` `handleTracksUpload` |
+| T17 | **`saveFile` leaks descriptors and silently overwrites collisions.** ✅ Fixed: `defer file.Close()`, `defer dst.Close()` on error paths, path-safety via `safeUploadName`, collision resolution via `uniquePath` (FR-SEC-3). | P1 | `internal/http/handlers.go` `saveFile` |
+| T18 | **SSE emitter blocks all subscribers on one slow consumer.** ✅ Emitter uses non-blocking send; slow subscribers drop events rather than stalling the broadcast (FR-SEC-4). Subscriber channels are now buffered (16). | P1 | `internal/pkg/sse/emitter.go`, `internal/http/handlers.go` `handleEvents` |
+| T19 | **HLS playlist returns 200 with empty body when playback stopped.** ✅ Now returns 503 with `Cache-Control: no-cache, no-store, must-revalidate` so listeners retry and caches don't loop stale windows (FR-SEC-5). | P1 | `internal/http/handlers.go` `handleHLSPlaylist` |
+| T20 | **`handlePlaylists`, `handlePlaylist`, `handleDeletePlaylist` missed `return` after error responses**, causing double-writes to the response body. ✅ Fixed. | P2 | `internal/http/handlers.go` |
+| T21 | **Multipart temp files never cleaned up.** ✅ `defer r.MultipartForm.RemoveAll()` in `handleTracksUpload`. | P2 | `internal/http/handlers.go` `handleTracksUpload` |
+| T22 | **Partial upload success leaks files on later failure.** ✅ Rollback loop deletes previously-saved files if any later file fails (FR-SEC-8). | P2 | `internal/http/handlers.go` `handleTracksUpload` |
 
 ## 2 — Business model
 
