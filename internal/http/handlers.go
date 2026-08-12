@@ -1,6 +1,7 @@
 package http
 
 import (
+	"context"
 	"crypto/subtle"
 	"errors"
 	"fmt"
@@ -10,23 +11,55 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strings"
 	"time"
 
 	"github.com/cheatsnake/airstation/internal/pkg/sse"
 	"github.com/cheatsnake/airstation/internal/station"
 	"github.com/cheatsnake/airstation/internal/track"
 	"github.com/golang-jwt/jwt/v5"
+	"github.com/oklog/ulid/v2"
 )
+
+// ulidMake is a tiny adapter used by shortRand so callers do not need to
+// import the ulid package.
+func ulidMake() ulid.ULID { return ulid.Make() }
+
+// handleHealth is a liveness probe — returns 200 once the process has started.
+// It does not check downstream dependencies; that is what /readyz is for.
+func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
+	jsonResponse(w, map[string]string{"status": "ok"})
+}
+
+// handleReady is a readiness probe — returns 200 only when the storage backend
+// is reachable. Used by Cloud Run / Kubernetes to gate traffic. Object-store
+// and other downstream checks should be added here as those interfaces land.
+func (s *Server) handleReady(w http.ResponseWriter, r *http.Request) {
+	ctx, cancel := context.WithTimeout(r.Context(), 2*time.Second)
+	defer cancel()
+	if err := s.storage.Ping(ctx); err != nil {
+		jsonMessage(w, http.StatusServiceUnavailable, "storage unreachable: "+err.Error())
+		return
+	}
+	jsonResponse(w, map[string]string{"status": "ready"})
+}
 
 const multipartChunkLimit = 64 * 1024 * 1024 // 64 MB
 const copyBufferSize = 256 * 1024            // 256 KB
 
 func (s *Server) handleHLSPlaylist(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "audio/mpegurl")
+	// HLS playlists change every segment; never let a proxy or browser
+	// cache them or listeners will loop the same window forever.
+	w.Header().Set("Cache-Control", "no-cache, no-store, must-revalidate")
 
-	if s.playbackState.IsPlaying {
-		fmt.Fprint(w, s.playbackState.PlaylistStr)
+	if !s.playbackState.IsPlaying {
+		// Return 503 so listeners retry rather than treating an empty
+		// playlist as a successful "no tracks" response.
+		w.WriteHeader(http.StatusServiceUnavailable)
+		return
 	}
+	fmt.Fprint(w, s.playbackState.PlaylistStr)
 }
 
 func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
@@ -34,7 +67,9 @@ func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("Connection", "keep-alive")
 
-	eventChan := make(chan *sse.Event)
+	// Buffered so a briefly-slow consumer doesn't force the emitter to drop
+	// its event on the floor (see sse.Emitter — sends are non-blocking).
+	eventChan := make(chan *sse.Event, 16)
 	s.eventsEmitter.Subscribe(eventChan)
 
 	closeNotify := r.Context().Done()
@@ -122,11 +157,30 @@ func (s *Server) handleTracks(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleTracksUpload(w http.ResponseWriter, r *http.Request) {
+	// Cap total request body size to prevent disk-fill DoS. Zero disables.
+	if s.config.MaxUploadBytes > 0 {
+		r.Body = http.MaxBytesReader(w, r.Body, s.config.MaxUploadBytes)
+	}
+
 	err := r.ParseMultipartForm(multipartChunkLimit)
 	if err != nil {
+		// Distinguish "too big" (413) from parse errors (400).
+		var mbErr *http.MaxBytesError
+		if errors.As(err, &mbErr) {
+			jsonMessage(w, http.StatusRequestEntityTooLarge,
+				fmt.Sprintf("Upload exceeds the %d-byte limit.", s.config.MaxUploadBytes))
+			return
+		}
 		jsonBadRequest(w, "Failed to parse multipart form: "+err.Error())
 		return
 	}
+	// Multipart parsing spills large parts to temp files; clean them up
+	// regardless of success or failure below.
+	defer func() {
+		if r.MultipartForm != nil {
+			_ = r.MultipartForm.RemoveAll()
+		}
+	}()
 
 	files := r.MultipartForm.File["tracks"]
 	if len(files) == 0 {
@@ -134,12 +188,23 @@ func (s *Server) handleTracksUpload(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	saved := make([]string, 0, len(files))
 	for _, fileHeader := range files {
-		_, err := s.saveFile(fileHeader)
+		path, err := s.saveFile(fileHeader)
 		if err != nil {
+			// Roll back the partial success so a failed upload doesn't
+			// litter the tracks directory with half-processed files.
+			for _, p := range saved {
+				_ = os.Remove(p)
+			}
+			s.logger.Warn("Track upload failed",
+				"error", err,
+				"filename", fileHeader.Filename,
+				"saved_before_fail", len(saved))
 			jsonBadRequest(w, err.Error())
 			return
 		}
+		saved = append(saved, path)
 	}
 
 	go s.trackService.LoadTracksFromDisk(s.config.TracksDir)
@@ -308,6 +373,7 @@ func (s *Server) handlePlaylists(w http.ResponseWriter, r *http.Request) {
 	pls, err := s.playlistService.Playlists()
 	if err != nil {
 		jsonBadRequest(w, "Playlists retrieving failed: "+err.Error())
+		return
 	}
 
 	jsonResponse(w, pls)
@@ -319,6 +385,7 @@ func (s *Server) handlePlaylist(w http.ResponseWriter, r *http.Request) {
 	pl, err := s.playlistService.Playlist(id)
 	if err != nil {
 		jsonBadRequest(w, "Playlist retrieving failed: "+err.Error())
+		return
 	}
 
 	jsonResponse(w, pl)
@@ -352,6 +419,7 @@ func (s *Server) handleDeletePlaylist(w http.ResponseWriter, r *http.Request) {
 	err := s.playlistService.DeletePlaylist(id)
 	if err != nil {
 		jsonBadRequest(w, "Playlist deletion failed: "+err.Error())
+		return
 	}
 
 	jsonOK(w, "Playlist deleted")
@@ -401,29 +469,84 @@ func (s *Server) handleEditStationInfo(w http.ResponseWriter, r *http.Request) {
 func (s *Server) saveFile(fileHeader *multipart.FileHeader) (string, error) {
 	file, err := fileHeader.Open()
 	if err != nil {
-		msg := "Failed to open file: " + err.Error()
-		s.logger.Debug(msg)
-		return "", errors.New(msg)
+		return "", fmt.Errorf("open uploaded file: %w", err)
+	}
+	defer file.Close()
+
+	// filepath.Base strips any directory component, which stops the classic
+	// "../../etc/passwd" traversal attack. Rejecting names that resolve to
+	// "." or "/" or that are otherwise empty guards against oddball edge
+	// cases the base cleanup does not catch.
+	fileName := safeUploadName(fileHeader.Filename)
+	if fileName == "" {
+		return "", fmt.Errorf("uploaded file has no usable name")
 	}
 
-	fileName := filepath.Base(fileHeader.Filename)
+	// Avoid overwriting an existing library file. If a name collides,
+	// append a short random suffix before the extension.
 	filePath := filepath.Join(s.config.TracksDir, fileName)
+	filePath = uniquePath(filePath)
+
 	dst, err := os.Create(filePath)
 	if err != nil {
-		msg := "Failed to create file on disk: " + err.Error()
-		s.logger.Debug(msg)
-		return "", errors.New(msg)
+		return "", fmt.Errorf("create file on disk: %w", err)
 	}
 
-	_, err = io.CopyBuffer(dst, file, make([]byte, copyBufferSize))
-	if err != nil {
-		msg := "Failed to save file: " + err.Error()
-		s.logger.Debug(msg)
-		return "", errors.New(msg)
+	if _, err = io.CopyBuffer(dst, file, make([]byte, copyBufferSize)); err != nil {
+		// Best-effort cleanup so a half-written file isn't left behind.
+		_ = dst.Close()
+		_ = os.Remove(filePath)
+		return "", fmt.Errorf("copy upload body: %w", err)
 	}
-
-	file.Close()
-	dst.Close()
+	if err := dst.Close(); err != nil {
+		_ = os.Remove(filePath)
+		return "", fmt.Errorf("close file: %w", err)
+	}
 
 	return filePath, nil
+}
+
+// safeUploadName sanitises an untrusted multipart filename. It strips any
+// path component and rejects names that would otherwise be no-ops on disk.
+func safeUploadName(raw string) string {
+	name := filepath.Base(raw)
+	// filepath.Base returns "." for empty input and "/" for a bare slash.
+	if name == "." || name == string(filepath.Separator) || name == "" {
+		return ""
+	}
+	return name
+}
+
+// uniquePath appends a short random suffix before the extension when the
+// target path already exists, so concurrent uploads with the same filename
+// don't overwrite one another.
+func uniquePath(path string) string {
+	if _, err := os.Stat(path); errors.Is(err, os.ErrNotExist) {
+		return path
+	}
+	ext := filepath.Ext(path)
+	stem := strings.TrimSuffix(path, ext)
+	// Try a handful of suffixes; if all collide (extremely unlikely),
+	// return the last candidate and let the caller fail loudly.
+	for i := 0; i < 8; i++ {
+		candidate := stem + "-" + shortRand() + ext
+		if _, err := os.Stat(candidate); errors.Is(err, os.ErrNotExist) {
+			return candidate
+		}
+	}
+	return stem + "-" + shortRand() + ext
+}
+
+// shortRand returns a 6-character alphanumeric random suffix. Not
+// cryptographic — just enough to disambiguate two uploads with the same
+// stem in the same second.
+func shortRand() string {
+	const alphabet = "abcdefghijklmnopqrstuvwxyz0123456789"
+	buf := make([]byte, 6)
+	// Use ulid for entropy since we already depend on it elsewhere.
+	id := ulidMake()
+	for i := 0; i < 6; i++ {
+		buf[i] = alphabet[int(id[i])%len(alphabet)]
+	}
+	return string(buf)
 }

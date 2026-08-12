@@ -1,6 +1,7 @@
 package sqlite
 
 import (
+	"context"
 	"database/sql"
 	"fmt"
 	"log/slog"
@@ -56,6 +57,10 @@ func New(dbPath string, log *slog.Logger) (*Instance, error) {
 	instance.StationStore = NewStationStore(db, &instance.mutex)
 
 	return instance, nil
+}
+
+func (ins *Instance) Ping(ctx context.Context) error {
+	return ins.db.PingContext(ctx)
 }
 
 func (ins *Instance) Close() error {

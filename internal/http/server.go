@@ -7,6 +7,7 @@ import (
 	"mime"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/cheatsnake/airstation/internal/config"
@@ -30,10 +31,12 @@ type Server struct {
 	playbackService *playback.Service
 	playlistService *playlist.Service
 	stationService  *station.Service
+	storage         storage.Storage
 	config          *config.Config
 	logger          *slog.Logger
 	router          *http.ServeMux
 	httpServer      *http.Server
+	loginLimiter    *tokenBucket
 }
 
 func NewServer(store storage.Storage, conf *config.Config, logger *slog.Logger) *Server {
@@ -46,33 +49,89 @@ func NewServer(store storage.Storage, conf *config.Config, logger *slog.Logger) 
 	state := playback.NewState(ts, qs, ps, conf.TmpDir, logger.WithGroup("playback"))
 
 	router := http.NewServeMux()
+	emitter := sse.NewEmitter()
+	emitter.SetLogger(logger.WithGroup("sse"))
 	s := &Server{
 		playbackState:   state,
-		eventsEmitter:   sse.NewEmitter(),
+		eventsEmitter:   emitter,
 		trackService:    ts,
 		queueService:    qs,
 		playbackService: ps,
 		playlistService: pls,
 		stationService:  ss,
+		storage:         store,
 		config:          conf,
 		logger:          logger.WithGroup("http"),
 		router:          router,
 	}
+	s.loginLimiter = newTokenBucket(
+		float64(maxInt(conf.LoginRateBurst, 1)),
+		float64(maxInt(conf.LoginRateRefillPerMin, 1))/60.0,
+	)
 	s.httpServer = &http.Server{
 		Addr:    ":" + conf.HTTPPort,
-		Handler: cors.Default().Handler(router),
+		Handler: requestID(configuredCORS(conf).Handler(router)),
 	}
 	return s
+}
+
+// maxInt returns the larger of a and b, or 1 if both are non-positive. Used
+// to guarantee the rate limiter has non-zero parameters even if config
+// values are misconfigured.
+func maxInt(a, b int) int {
+	if a > b {
+		if a > 0 {
+			return a
+		}
+		return 1
+	}
+	if b > 0 {
+		return b
+	}
+	return 1
+}
+
+// configuredCORS returns the CORS handler. If SILKRADDY_CORS_ORIGINS is
+// empty, we preserve the legacy permissive default so existing self-host
+// deploys are unaffected. In production, set the env to a comma-separated
+// origin allowlist.
+func configuredCORS(conf *config.Config) *cors.Cors {
+	if conf.CORSAllowedOrigins == "" {
+		return cors.Default()
+	}
+	origins := splitAndTrim(conf.CORSAllowedOrigins, ",")
+	return cors.New(cors.Options{
+		AllowedOrigins:   origins,
+		AllowCredentials: true,
+		AllowedMethods:   []string{"GET", "POST", "PUT", "DELETE", "OPTIONS"},
+		AllowedHeaders:   []string{"Content-Type", "Authorization", "X-Request-Id"},
+	})
+}
+
+func splitAndTrim(s, sep string) []string {
+	parts := strings.Split(s, sep)
+	out := make([]string, 0, len(parts))
+	for _, p := range parts {
+		p = strings.TrimSpace(p)
+		if p != "" {
+			out = append(out, p)
+		}
+	}
+	return out
 }
 
 func (s *Server) Run() {
 	s.registerMP2TMimeType()
 
+	// Health probes (public, no auth, no logging noise expected)
+	s.router.HandleFunc("GET /healthz", s.handleHealth)
+	s.router.HandleFunc("GET /readyz", s.handleReady)
+
 	// Public handlers
 	s.router.HandleFunc("GET /stream", s.handleHLSPlaylist)
 	s.router.HandleFunc("GET /api/v1/events", s.handleEvents)
 	s.router.HandleFunc("GET /api/v1/station/info", s.handleStationInfo)
-	s.router.HandleFunc("POST /api/v1/login", s.handleLogin)
+	s.router.Handle("POST /api/v1/login", s.rateLimit(http.HandlerFunc(s.handleLogin), s.loginLimiter, clientIP))
 	s.router.Handle("GET /static/tmp/", s.handleStaticDirWithoutCache("/static/tmp", s.config.TmpDir))
 	s.router.Handle("GET /api/v1/playback", http.HandlerFunc(s.handlePlaybackState))
 	s.router.Handle("GET /api/v1/playback/history", http.HandlerFunc(s.handlePlaybackHistory))

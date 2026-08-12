@@ -9,12 +9,14 @@ runbook; it is not consumed by any tooling.
 | Phase | Scope | Status |
 | --- | --- | --- |
 | 0 | Cloud Run runtime compatibility (`$PORT`, graceful SIGTERM shutdown) | done |
-| 1 | Postgres `Store` implementation alongside the existing sqlite one | pending |
+| 1 | Postgres `Store` implementation alongside the existing sqlite one | done |
 | 2 | `FileStore` interface with `localFS` and `gcs` backends for tracks/segments | pending |
 | 3 | Deploy artifacts and Terraform/`gcloud` automation | pending |
 
-A Phase 0 deploy boots and listens on `$PORT`, but state is still on the
-container's ephemeral disk. Treat it as a smoke test until Phases 1 and 2 land.
+A Phase 1 deploy will have a durable database, but track audio and HLS
+segments still live on the container's ephemeral disk — they are wiped on
+every cold start. Real production needs Phase 2 to land before listeners can
+rely on track persistence.
 
 ## Variables
 
@@ -88,28 +90,54 @@ Flag rationale:
   multiple instances would each have their own database and contradict each
   other. Lift this once Postgres is wired up.
 
-## Pending — Phases 1 and 2 setup
+## Phase 1 — Cloud SQL Postgres setup
 
-These commands describe what will be needed once the corresponding code lands.
-Do not run them yet for production; the binary still ignores both Postgres and
-GCS.
+The Postgres `Store` implementation is now in tree at
+`internal/storage/postgres/`. The binary selects it when
+`AIRSTATION_DB_DRIVER=postgres` and a DSN is provided in
+`AIRSTATION_POSTGRES_URL`. Migrations run automatically on first boot.
 
 ```bash
-# Cloud SQL Postgres (Phase 1)
+# Provision Cloud SQL
 gcloud sql instances create silkraddy-db \
   --database-version=POSTGRES_16 \
   --tier=db-f1-micro \
   --region="$REGION"
 gcloud sql databases create silkraddy --instance=silkraddy-db
-gcloud sql users create silkraddy --instance=silkraddy-db --password="$(openssl rand -hex 24)"
 
-# GCS bucket for tracks and HLS segments (Phase 2)
-gsutil mb -l "$REGION" "gs://$PROJECT_ID-silkraddy-media"
-gsutil iam ch "serviceAccount:$SA:roles/storage.objectAdmin" "gs://$PROJECT_ID-silkraddy-media"
+DB_PASSWORD="$(openssl rand -hex 24)"
+gcloud sql users create silkraddy --instance=silkraddy-db --password="$DB_PASSWORD"
 
-# Wire the Postgres connection into the Cloud Run service (Phase 1)
+# Store the DSN as a secret so it can be mounted into Cloud Run.
+# host=/cloudsql/... is the Unix-socket form Cloud Run mounts when
+# --add-cloudsql-instances is set.
+INSTANCE_CONN="$PROJECT_ID:$REGION:silkraddy-db"
+printf 'host=/cloudsql/%s user=silkraddy password=%s dbname=silkraddy sslmode=disable' \
+  "$INSTANCE_CONN" "$DB_PASSWORD" \
+  | gcloud secrets create AIRSTATION_POSTGRES_URL --data-file=-
+gcloud secrets add-iam-policy-binding AIRSTATION_POSTGRES_URL \
+  --member="serviceAccount:$SA" \
+  --role="roles/secretmanager.secretAccessor"
+
+# Wire Cloud SQL + driver selection into the running service
 gcloud run services update "$SERVICE" \
   --region "$REGION" \
-  --add-cloudsql-instances "$PROJECT_ID:$REGION:silkraddy-db" \
-  --update-env-vars AIRSTATION_DB_DRIVER=postgres
+  --add-cloudsql-instances "$INSTANCE_CONN" \
+  --update-env-vars AIRSTATION_DB_DRIVER=postgres \
+  --update-secrets AIRSTATION_POSTGRES_URL=AIRSTATION_POSTGRES_URL:latest
+```
+
+Once this is in place, the `--max-instances 1` cap from the Phase 0 section
+can be lifted — Postgres serializes writes natively and no longer requires the
+single-writer constraint that local SQLite imposed.
+
+## Pending — Phase 2 setup
+
+This command describes what will be needed once the GCS `FileStore` lands.
+Do not run it yet; the binary still writes tracks and HLS segments to local
+disk.
+
+```bash
+gsutil mb -l "$REGION" "gs://$PROJECT_ID-silkraddy-media"
+gsutil iam ch "serviceAccount:$SA:roles/storage.objectAdmin" "gs://$PROJECT_ID-silkraddy-media"
 ```
